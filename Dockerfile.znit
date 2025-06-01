@@ -1,0 +1,23 @@
+FROM alpine:latest
+
+# Install basic tools for testing
+RUN apk add --no-cache \
+    bash \
+    coreutils \
+    procps \
+    strace \
+    curl
+
+# Copy znit binary from host build
+COPY zig-out/bin/znit /usr/local/bin/znit
+RUN chmod +x /usr/local/bin/znit
+
+# Copy test script
+COPY test-tini.sh /test-init.sh
+RUN chmod +x /test-init.sh
+
+# Set znit as the entrypoint
+ENTRYPOINT ["/usr/local/bin/znit", "--"]
+
+# Default command for interactive testing
+CMD ["/bin/bash"]
