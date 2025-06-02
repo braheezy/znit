@@ -15,11 +15,11 @@ const SignalConfiguration = struct {
     sig_ttou_action: *std.posix.Sigaction,
 };
 
-pub fn main() !void {
-    // const child_pid: std.posix.pid_t = 0;
+pub fn main() void {
+    const child_pid: std.posix.pid_t = 0;
 
-    // // These are passed to function to get an exit code back.
-    // var child_exitcode: i32 = -1; // This isn't a valid exit code, and lets us tell whether the child has exited.
+    // These are passed to function to get an exit code back.
+    // const child_exitcode: i32 = -1; // This isn't a valid exit code, and lets us tell whether the child has exited.
 
     // Memory allocation setup
     const gpa, const is_debug = gpa: {
@@ -30,7 +30,10 @@ pub fn main() !void {
         };
     };
     defer if (is_debug) {
-        _ = debug_allocator.deinit();
+        if (gpa.deinit() == .leak) {
+            std.log.err("Memory leak detected", .{});
+            std.process.exit(1);
+        }
     };
 
     // Read arguments
@@ -43,12 +46,10 @@ pub fn main() !void {
         } else if (err == error.Usage) {
             std.process.exit(0);
         }
-        return err;
+        std.log.err("Error parsing arguments: {s}", .{@errorName(err)});
+        std.process.exit(1);
     };
 
-    std.debug.print("child_args: {s}\n", .{child_args});
-
-    // TODO: Configure signals
     var parent_sigset: std.posix.sigset_t = undefined;
     var child_sigset: std.posix.sigset_t = undefined;
     var sig_ttin_action = std.posix.Sigaction{
@@ -72,8 +73,19 @@ pub fn main() !void {
 
     // Trigger signal on this process when the parent process exits.
     if (parent_death_signal != 0) {
-        try std.posix.prctl(std.posix.PR.SET_PDEATHSIG, parent_death_signal);
+        std.posix.prctl(std.posix.PR.SET_PDEATHSIG, parent_death_signal) catch |err| {
+            std.log.err("Failed to set up parent death signal: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
     }
+
+    // Are we going to reap zombies properly? If not, warn.
+    checkReaper();
+
+    const ret_code = spawn(&child_sigconf, child_args, child_pid);
+    if (ret_code != 0) std.process.exit(ret_code);
+
+    // while (true) {};
 }
 
 fn parseArgs(args: [][:0]u8) ![][:0]u8 {
@@ -150,4 +162,82 @@ fn configureSignals(parent_sigset: *std.posix.sigset_t, sigconf: *SignalConfigur
 
     std.posix.sigaction(SIG.TTIN, &ignore_action, sigconf.sig_ttin_action);
     std.posix.sigaction(SIG.TTOU, &ignore_action, sigconf.sig_ttou_action);
+}
+
+fn checkReaper() !void {
+    if (std.os.linux.getpid() == 1) return;
+
+    std.log.warn("znit is not running as PID 1. Zombie processes will not be re-parented to znit, so zombie reaping won't work. To fix the problem, run znit as PID 1.", .{});
+}
+
+fn spawn(sigconf: *SignalConfiguration, child_args: [][]u8, child_pid: *std.posix.pid_t) !i32 {
+    const pid = std.posix.fork() catch |err| {
+        std.log.err("fork failed: {s}", .{@errorName(err)});
+        return 1;
+    };
+
+    if (pid == 0) {
+        // Put the child in a process group and make it the foreground process if there is a tty.
+        isolateChild() catch return 1;
+
+        // Restore all signal handlers to the way they were before we touched them.
+        restoreSignals(sigconf) catch return 1;
+
+        std.posix.execvpeZ(child_args[0], child_args, null) catch |err| {
+            std.log.err("exec {s} failed: {s}", .{ child_args[0], @errorName(err) });
+            const status = switch (err) {
+                error.AccessDenied => 126,
+                error.FileNotFound => 127,
+                else => 1,
+            };
+            return status;
+        };
+    } else {
+        // parent
+        std.log.info("Spawned child process '{s}' with pid '{d}'", .{ child_args[0], pid });
+        child_pid.* = pid;
+        return 0;
+    }
+}
+
+fn isolateChild() !void {
+    // Put the child into a new process group.
+    std.posix.setpgid(0, 0) catch |err| {
+        std.log.err("setpgid failed: {s}", .{@errorName(err)});
+        return error.SetpgidFailed;
+    };
+
+    // If there is a tty, allocate it to this new process group. We
+    // can do this in the child process because we're blocking
+    // SIGTTIN / SIGTTOU.
+
+    // Doing it in the child process avoids a race condition scenario
+    // if znit is calling znit (in which case the grandparent may make the
+    // parent the foreground process group, and the actual child ends up...
+    // in the background!)
+    std.posix.tcsetpgrp(std.posix.STDIN_FILENO, std.posix.tcgetpgrp()) catch |err| {
+        if (err == error.NotATerminal) {
+            std.log.debug("tcsetpgrp failed: no tty (ok to proceed)", .{});
+        } else {
+            std.log.err("tcsetpgrp failed: {s}", .{@errorName(err)});
+            return error.TcsetpgrpFailed;
+        }
+    };
+}
+
+fn restoreSignals(sigconf: *SignalConfiguration) !void {
+    std.posix.sigprocmask(SIG.SETMASK, sigconf.sig_mask, null) catch |err| {
+        std.log.err("Restoring child signal mask failed: '{s}'", .{@errorName(err)});
+        return error.RestoreSignalsFailed;
+    };
+
+    std.posix.sigaction(SIG.TTIN, sigconf.sig_ttin_action, null) catch |err| {
+        std.log.err("Restoring SIGTTIN handler failed: '{s}'", .{@errorName(err)});
+        return error.RestoreSignalsFailed;
+    };
+
+    std.posix.sigaction(SIG.TTOU, sigconf.sig_ttou_action, null) catch |err| {
+        std.log.err("Restoring SIGTTOU handler failed: '{s}'", .{@errorName(err)});
+        return error.RestoreSignalsFailed;
+    };
 }
