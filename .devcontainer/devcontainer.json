@@ -17,7 +17,6 @@
       "extensions": [
         "ms-azuretools.vscode-docker",
         "ziglang.vscode-zig",
-        "ianic.zig-language-extras",
         "vadimcn.vscode-lldb"
       ]
     }
