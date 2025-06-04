@@ -114,17 +114,26 @@ test_basic() {
 
     echo "1. Version check:"
     log_command "docker run --rm $IMAGE_NAME $INIT_BINARY --version"
-    docker run --rm "$IMAGE_NAME" "$INIT_BINARY" --version || true
+    if ! docker run --rm "$IMAGE_NAME" "$INIT_BINARY" --version; then
+        echo "ERROR: Version check failed for $INIT_NAME"
+        return 1
+    fi
     echo
 
     echo "2. Help output:"
     log_command "docker run --rm $IMAGE_NAME $INIT_BINARY -h"
-    docker run --rm "$IMAGE_NAME" "$INIT_BINARY" -h || true
+    if ! docker run --rm "$IMAGE_NAME" "$INIT_BINARY" -h; then
+        echo "ERROR: Help output failed for $INIT_NAME"
+        return 1
+    fi
     echo
 
     echo "3. Basic command execution:"
     log_command "docker run --rm $IMAGE_NAME echo 'Hello from $INIT_NAME container'"
-    docker run --rm "$IMAGE_NAME" echo "Hello from $INIT_NAME container"
+    if ! docker run --rm "$IMAGE_NAME" echo "Hello from $INIT_NAME container"; then
+        echo "ERROR: Basic command execution failed for $INIT_NAME"
+        return 1
+    fi
     echo
 }
 

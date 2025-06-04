@@ -99,11 +99,13 @@ pub fn main() void {
     if (ret_code != 0) std.process.exit(ret_code);
 
     while (true) {
+        std.log.debug("=== MAIN LOOP ITERATION ===", .{});
         // Wait for one signal, and forward it
         waitAndForwardSignal(&parent_sigset, child_pid) catch std.process.exit(1);
 
         // reap them zombies
         child_exitcode = reapZombies(child_pid) catch std.process.exit(1);
+        std.log.debug("=== MAIN LOOP: child_exitcode after reapZombies = {?d} ===", .{child_exitcode});
 
         if (child_exitcode != null) {
             std.log.info("Exiting: child has exited", .{});
@@ -115,26 +117,54 @@ pub fn main() void {
 fn parseArgs(args: [][:0]u8) ![][:0]u8 {
     const program_name = args[0];
 
-    // We handle --version if it's the *only* argument provided.
-    if (args.len == 2 and std.mem.eql(u8, args[1], "--version")) {
+    // Find where the actual command arguments start
+    // Docker ENTRYPOINT may insert '--' as arg[1], so we need to handle:
+    // Case 1: [program] [--version]                    -> args.len == 2
+    // Case 2: [program] [--] [program] [--version]     -> args.len == 4, check args[3]
+    // Case 3: [program] [--] [command] [args...]       -> normal execution
+    // Case 4: [program] [-h]                           -> args.len == 2
+    // Case 5: [program] [--] [program] [-h]            -> args.len == 4, check args[3]
+
+    var start_idx: usize = 1;
+    var has_separator = false;
+
+    // Check if we have -- as the first argument (Docker ENTRYPOINT case)
+    if (args.len > 1 and std.mem.eql(u8, args[1], "--")) {
+        has_separator = true;
+        start_idx = 2;
+    }
+
+    // Handle --version flag
+    if ((args.len == 2 and std.mem.eql(u8, args[1], "--version")) or
+        (args.len == 4 and has_separator and std.mem.eql(u8, args[3], "--version")))
+    {
         std.debug.print("{s}\n", .{znit_version});
         return error.Version;
     }
 
-    for (args) |arg| {
+    // Handle -h flag
+    if ((args.len == 2 and std.mem.eql(u8, args[1], "-h")) or
+        (args.len == 4 and has_separator and std.mem.eql(u8, args[3], "-h")))
+    {
+        try printUsage(program_name, std.io.getStdErr().writer());
+        return error.Usage;
+    }
+
+    // Check for other -h flags in any position
+    for (args[start_idx..]) |arg| {
         if (std.mem.eql(u8, arg, "-h")) {
             try printUsage(program_name, std.io.getStdErr().writer());
             return error.Usage;
         }
     }
 
-    if (args.len == 1) {
-        // user forgot to provide args
+    // If we only have the program name (and optionally --), show usage
+    if (args.len <= start_idx) {
         try printUsage(program_name, std.io.getStdErr().writer());
         return error.Usage;
     }
 
-    return args[1..];
+    return args[start_idx..];
 }
 
 fn printUsage(program_name: []const u8, writer: anytype) !void {
@@ -209,14 +239,22 @@ fn spawn(sigconf: *SignalConfiguration, child_args: [][:0]u8, child_pid: *std.po
         // Restore all signal handlers to the way they were before we touched them.
         restoreSignals(sigconf) catch return 1;
 
-        // execvpeZ only returns on error.
-        const err = std.posix.execvpeZ(child_args[0], @ptrCast(child_args.ptr), @ptrCast(std.os.environ.ptr));
-        const status: u8 = switch (err) {
+        var env = [_:null]?[*:0]u8{};
+        var args = [_:null]?[*:0]const u8{ "echo", "machin", "test" };
+
+        // Use execvpeZ to search PATH - this function returns noreturn on success, error on failure
+        std.debug.print("execvpeZ: {s}\n", .{
+            child_args,
+        });
+        const exec_err = std.posix.execvpeZ(child_args[0], args[0..args.len], env[0..env.len]);
+
+        std.log.err("execvpeZ failed: {s}", .{@errorName(exec_err)});
+        const status: u8 = switch (exec_err) {
             error.AccessDenied => 126,
             error.FileNotFound => 127,
             else => 1,
         };
-        return status;
+        std.process.exit(status);
     } else {
         // parent
         std.log.info("Spawned child process '{s}' with pid '{d}'", .{ child_args[0], pid });
@@ -240,13 +278,16 @@ fn isolateChild() !void {
     // if znit is calling znit (in which case the grandparent may make the
     // parent the foreground process group, and the actual child ends up...
     // in the background!)
-    const pgrp = getpgrp();
+    const pgrp = getpgrp() catch |err| {
+        std.log.err("getpgrp failed: {s}", .{@errorName(err)});
+        return err;
+    };
     std.posix.tcsetpgrp(std.posix.STDIN_FILENO, pgrp) catch |err| {
         if (err == error.NotATerminal) {
             std.log.debug("tcsetpgrp failed: no tty (ok to proceed)", .{});
         } else {
             std.log.err("tcsetpgrp failed: {s}", .{@errorName(err)});
-            return error.TcsetpgrpFailed;
+            return err;
         }
     };
 }
@@ -288,52 +329,112 @@ fn waitAndForwardSignal(parent_sigset: *std.posix.sigset_t, child_pid: std.posix
 
 // ?TODO: Upstream to zig std lib
 fn sigtimedwait(set: *std.os.linux.sigset_t, info: *std.os.linux.siginfo_t, timeout: std.posix.timespec) !void {
-    switch (std.posix.errno(std.os.linux.syscall3(
+    // Linux kernel expects sigsetsize to be 8 (64 bits / 8 bits per byte)
+    // This is the size of the kernel's sigset_t, not necessarily the libc one
+    const sigsetsize = 8;
+
+    switch (std.posix.errno(std.os.linux.syscall4(
         std.os.linux.SYS.rt_sigtimedwait,
         @intFromPtr(set),
         @intFromPtr(info),
         @intFromPtr(&timeout),
+        sigsetsize,
     ))) {
         .SUCCESS => return,
-        .AGAIN, .INTR => return,
-        else => |err| return std.posix.unexpectedErrno(err),
+        .AGAIN, .INTR => return, // Timeout or interrupted
+        .INVAL => {
+            std.log.err("sigtimedwait: Invalid argument (signal set size={}, timeout={}.{} sec)", .{ sigsetsize, timeout.sec, timeout.nsec });
+            return error.InvalidArgument;
+        },
+        else => |err| {
+            std.log.err("sigtimedwait failed with errno: {d}", .{@intFromEnum(err)});
+            return std.posix.unexpectedErrno(err);
+        },
     }
 }
 
 // ?TODO: Upstream to zig std lib
 // Get the process group ID of the calling process
-fn getpgrp() std.posix.pid_t {
-    switch (std.posix.errno(std.os.linux.syscall1(std.os.linux.SYS.getpgid, 0))) {
-        .SUCCESS => return @intCast(std.os.linux.syscall1(std.os.linux.SYS.getpgid, 0)),
-        else => unreachable,
+fn getpgrp() !std.posix.pid_t {
+    const result = std.os.linux.syscall1(std.os.linux.SYS.getpgid, 0);
+    switch (std.posix.errno(result)) {
+        .SUCCESS => return @intCast(result),
+        else => |err| {
+            std.log.err("getpgrp failed with errno: {d}", .{@intFromEnum(err)});
+            return std.posix.unexpectedErrno(err);
+        },
+    }
+}
+
+// Safe wrapper around waitpid that handles ECHILD properly
+fn safe_waitpid(wpid: std.posix.pid_t, options: u32) ?std.posix.WaitPidResult {
+    std.log.debug("safe_waitpid: Called with wpid={d}, options={d}", .{ wpid, options });
+
+    // Manual waitpid implementation that handles ECHILD by returning null
+    var status: if (builtin.link_libc) c_int else u32 = undefined;
+    while (true) {
+        const rc = std.posix.system.waitpid(wpid, &status, @intCast(options));
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {
+                std.log.debug("safe_waitpid: SUCCESS, pid={d}, status={d}", .{ rc, status });
+                return .{
+                    .pid = @intCast(rc),
+                    .status = @bitCast(status),
+                };
+            },
+            .INTR => {
+                std.log.debug("safe_waitpid: EINTR, continuing", .{});
+                continue;
+            },
+            .CHILD => {
+                std.log.debug("safe_waitpid: ECHILD, no children to wait for", .{});
+                return null;
+            },
+            .INVAL => unreachable, // Invalid flags.
+            else => |err| {
+                std.log.err("safe_waitpid: Unexpected error: {d}", .{@intFromEnum(err)});
+                return null;
+            },
+        }
     }
 }
 
 fn reapZombies(child_pid: std.posix.pid_t) !?u32 {
+    std.log.debug("reapZombies: Starting zombie reaping for child_pid={d}", .{child_pid});
     var exitcode: ?u32 = null;
     while (true) {
-        const pid_result = std.posix.waitpid(-1, std.os.linux.W.NOHANG);
-        const current_pid = pid_result.pid;
-        const current_status = pid_result.status;
+        std.log.debug("reapZombies: Calling safe_waitpid", .{});
+        // Use our safe waitpid wrapper
+        const result = safe_waitpid(-1, std.os.linux.W.NOHANG) orelse {
+            std.log.debug("No more children to reap", .{});
+            break;
+        };
+
+        std.log.debug("reapZombies: safe_waitpid returned, extracting pid and status", .{});
+        const current_pid = result.pid;
+        const status = result.status;
+        std.log.debug("reapZombies: current_pid={d}, status={d}", .{ current_pid, status });
 
         switch (current_pid) {
             0 => {
                 std.log.debug("No child to reap", .{});
+                break;
             },
             else => {
                 // A child was reaped. Check whether it's the main one. If it is, then
                 // set the exit_code, which will cause us to exit once we've reaped everyone else.
                 std.log.debug("Reaped child with pid: '{d}'", .{current_pid});
                 if (current_pid == child_pid) {
-                    if (std.os.linux.W.IFEXITED(current_status)) {
+                    std.log.debug("reapZombies: This is the main child, checking exit status", .{});
+                    if (std.os.linux.W.IFEXITED(status)) {
                         // Our process exited normally.
-                        std.log.info("Main child exited normally (with status '{d}')", .{std.os.linux.W.EXITSTATUS(current_status)});
-                        exitcode = std.os.linux.W.EXITSTATUS(current_status);
-                    } else if (std.os.linux.W.IFSIGNALED(current_status)) {
+                        std.log.info("Main child exited normally (with status '{d}')", .{std.os.linux.W.EXITSTATUS(status)});
+                        exitcode = std.os.linux.W.EXITSTATUS(status);
+                    } else if (std.os.linux.W.IFSIGNALED(status)) {
                         // Our process was terminated. Emulate what sh / bash
                         // would do, which is to return 128 + signal number.
-                        std.log.info("Main child exited with signal (with signal '{d}')", .{std.os.linux.W.TERMSIG(current_status)});
-                        exitcode = 128 + std.os.linux.W.TERMSIG(current_status);
+                        std.log.info("Main child exited with signal (with signal '{d}')", .{std.os.linux.W.TERMSIG(status)});
+                        exitcode = 128 + std.os.linux.W.TERMSIG(status);
                     } else {
                         std.log.err("Main child exited for unknown reason", .{});
                         return error.UnknownExitStatus;
@@ -346,9 +447,8 @@ fn reapZombies(child_pid: std.posix.pid_t) !?u32 {
                 continue;
             },
         }
-
-        break;
     }
+    std.log.debug("reapZombies: Finished, returning exitcode={?d}", .{exitcode});
     return exitcode;
 }
 
