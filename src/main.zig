@@ -12,6 +12,7 @@ var kill_process_group: u6 = 0;
 const ts = std.posix.timespec{ .sec = 1, .nsec = 0 };
 const STATUS_MAX = 255;
 const STATUS_MIN = 0;
+const expect_status = [_]u32{0} ** ((STATUS_MAX - STATUS_MIN + 1) / 32);
 
 const SignalConfiguration = struct {
     sig_mask: *std.posix.sigset_t,
@@ -155,6 +156,11 @@ fn parseArgs(args: [][:0]u8) ![][:0]u8 {
         if (std.mem.eql(u8, arg, "-h")) {
             try printUsage(program_name, std.io.getStdErr().writer());
             return error.Usage;
+        } else if (std.mem.eql(u8, arg, "-e")) {
+            addExpectStatus(arg) catch {
+                std.log.err("Not a valid option for -e: {s}", .{arg});
+                return error.InvalidOption;
+            };
         }
     }
 
@@ -165,6 +171,17 @@ fn parseArgs(args: [][:0]u8) ![][:0]u8 {
     }
 
     return args[start_idx..];
+}
+
+fn addExpectStatus(arg: []const u8) !void {
+    const status = try std.fmt.parseInt(u8, arg, 10);
+
+    if (status < STATUS_MIN or status > STATUS_MAX) {
+        return error.InvalidStatus;
+    }
+
+    checkBitfieldBounds(expect_status, status);
+    int32BitfieldSet(expect_status, status);
 }
 
 fn printUsage(program_name: []const u8, writer: anytype) !void {
@@ -180,6 +197,7 @@ fn printUsage(program_name: []const u8, writer: anytype) !void {
         \\
         \\  --version: Show version and exit.
         \\  -h: Show this help message and exit.
+        \\  -e EXIT_CODE: Remap EXIT_CODE (from 0 to 255) to 0 (can be repeated).
         \\
     , .{ basename, basename });
 }
@@ -442,6 +460,12 @@ fn reapZombies(child_pid: std.posix.pid_t) !?u32 {
 
                     // Be safe, ensure the status code is indeed between 0 and 255.
                     exitcode = exitcode.? % (STATUS_MAX - STATUS_MIN + 1);
+
+                    // If this exitcode was remapped, then set it to 0.
+                    checkBitfieldBounds(expect_status, exitcode.?);
+                    if (int32BitfieldTest(expect_status, exitcode.?)) {
+                        exitcode = 0;
+                    }
                 }
 
                 continue;
@@ -452,13 +476,20 @@ fn reapZombies(child_pid: std.posix.pid_t) !?u32 {
     return exitcode;
 }
 
-fn int32BitfieldCheckBounds(F: []const u32, i: usize) void {
-    // i is unsigned (>= 0), so only need to check i/32 < F.len
-    std.debug.assert(F.len > i / 32);
-}
-
 fn int32BitfieldTest(F: []const u32, i: usize) bool {
     return (F[i / 32] & (u32(1) << (i % 32))) != 0;
+}
+
+inline fn checkBitfieldBounds(F: []u32, i: isize) void {
+    std.debug.assert(i >= 0);
+    const idx = @as(usize, @intCast(i)) / 32;
+    std.debug.assert(idx < F.len);
+}
+/// Set bit `i` in a 32-bit–chunked bitfield `F`
+inline fn int32BitfieldSet(F: []u32, i: usize) void {
+    // chunk index = i / 32  (use >> 5)
+    // bit mask    = 1 << (i % 32)  (use & 31)
+    F[i >> 5] |= 1 << (i & 31);
 }
 
 const SigsetElement = u32;
