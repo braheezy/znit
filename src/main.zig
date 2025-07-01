@@ -13,6 +13,36 @@ const ts = std.posix.timespec{ .sec = 1, .nsec = 0 };
 const STATUS_MAX = 255;
 const STATUS_MIN = 0;
 const expect_status = [_]u32{0} ** ((STATUS_MAX - STATUS_MIN + 1) / 32);
+const signals = std.StaticStringMap(u6).initComptime(.{
+    .{ .key = "SIGHUP", .value = std.posix.SIG.HUP },
+    .{ .key = "SIGINT", .value = std.posix.SIG.INT },
+    .{ .key = "SIGQUIT", .value = std.posix.SIG.QUIT },
+    .{ .key = "SIGILL", .value = std.posix.SIG.ILL },
+    .{ .key = "SIGTRAP", .value = std.posix.SIG.TRAP },
+    .{ .key = "SIGABRT", .value = std.posix.SIG.ABRT },
+    .{ .key = "SIGBUS", .value = std.posix.SIG.BUS },
+    .{ .key = "SIGFPE", .value = std.posix.SIG.FPE },
+    .{ .key = "SIGKILL", .value = std.posix.SIG.KILL },
+    .{ .key = "SIGUSR1", .value = std.posix.SIG.USR1 },
+    .{ .key = "SIGSEGV", .value = std.posix.SIG.SEGV },
+    .{ .key = "SIGUSR2", .value = std.posix.SIG.USR2 },
+    .{ .key = "SIGPIPE", .value = std.posix.SIG.PIPE },
+    .{ .key = "SIGALRM", .value = std.posix.SIG.ALRM },
+    .{ .key = "SIGTERM", .value = std.posix.SIG.TERM },
+    .{ .key = "SIGCHLD", .value = std.posix.SIG.CHLD },
+    .{ .key = "SIGCONT", .value = std.posix.SIG.CONT },
+    .{ .key = "SIGSTOP", .value = std.posix.SIG.STOP },
+    .{ .key = "SIGTSTP", .value = std.posix.SIG.TSTP },
+    .{ .key = "SIGTTIN", .value = std.posix.SIG.TTIN },
+    .{ .key = "SIGTTOU", .value = std.posix.SIG.TTOU },
+    .{ .key = "SIGURG", .value = std.posix.SIG.URG },
+    .{ .key = "SIGXCPU", .value = std.posix.SIG.XCPU },
+    .{ .key = "SIGXFSZ", .value = std.posix.SIG.XFSZ },
+    .{ .key = "SIGVTALRM", .value = std.posix.SIG.VTALRM },
+    .{ .key = "SIGPROF", .value = std.posix.SIG.PROF },
+    .{ .key = "SIGWINCH", .value = std.posix.SIG.WINCH },
+    .{ .key = "SIGSYS", .value = std.posix.SIG.SYS },
+});
 
 const SignalConfiguration = struct {
     sig_mask: *std.posix.sigset_t,
@@ -161,6 +191,11 @@ fn parseArgs(args: [][:0]u8) ![][:0]u8 {
                 std.log.err("Not a valid option for -e: {s}", .{arg});
                 return error.InvalidOption;
             };
+        } else if (std.mem.eql(u8, arg, "-p")) {
+            setPDeathSig(arg) catch {
+                std.log.err("Not a valid option for -p: {s}", .{arg});
+                return error.InvalidOption;
+            };
         }
     }
 
@@ -198,8 +233,17 @@ fn printUsage(program_name: []const u8, writer: anytype) !void {
         \\  --version: Show version and exit.
         \\  -h: Show this help message and exit.
         \\  -e EXIT_CODE: Remap EXIT_CODE (from 0 to 255) to 0 (can be repeated).
+        \\  -p SIGNAL: Trigger SIGNAL when parent dies, e.g. "-p SIGKILL".
         \\
     , .{ basename, basename });
+}
+
+fn setPDeathSig(arg: []const u8) !void {
+    if (signals.get(arg)) |signal| {
+        parent_death_signal = signal;
+        return;
+    }
+    return error.InvalidSignal;
 }
 
 fn configureSignals(parent_sigset: *std.posix.sigset_t, sigconf: *SignalConfiguration) !void {

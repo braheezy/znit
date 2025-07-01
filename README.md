@@ -1,10 +1,10 @@
 # znit
 
-This is a minimal `init` system based of [`tini`](https://github.com/krallin/tini).
+This is a minimal `init` system based off of [`tini`](https://github.com/krallin/tini).
 
 Just like Tini, `znit` spawns a single child and waits for it to exit, reaping zombies and performing signal forwarding. It's meant to run in a container.
 
-`znit` tries to match `tini` in behavior but most of the extra features and options are implemented yet so just use `tini` if you need an init system.
+`znit` tries to match `tini` in behavior but most of the extra features and options are implemented yet so just use `tini` if you need an init system. See `znit --help` for the supported options.
 
 ## Usage
 
@@ -26,3 +26,7 @@ RUN chmod +x /usr/local/bin/znit
 # Set znit as the entrypoint
 ENTRYPOINT ["/usr/local/bin/znit", "--"]
 ```
+
+## Development
+
+Use the `.devcontainer` because this program is designed for Linux.
