@@ -8,7 +8,7 @@ const znit_version = "0.1.0";
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 
 var parent_death_signal: u6 = 0;
-var kill_process_group: u6 = 0;
+var kill_process_group: bool = false;
 const ts = std.posix.timespec{ .sec = 1, .nsec = 0 };
 const STATUS_MAX = 255;
 const STATUS_MIN = 0;
@@ -181,7 +181,7 @@ fn parseArgs(args: [][:0]u8) ![][:0]u8 {
         return error.Usage;
     }
 
-    // Check for other -h flags in any position
+    // Check for other flags in any position
     for (args[start_idx..]) |arg| {
         if (std.mem.eql(u8, arg, "-h")) {
             try printUsage(program_name, std.io.getStdErr().writer());
@@ -196,6 +196,8 @@ fn parseArgs(args: [][:0]u8) ![][:0]u8 {
                 std.log.err("Not a valid option for -p: {s}", .{arg});
                 return error.InvalidOption;
             };
+        } else if (std.mem.eql(u8, arg, "-g")) {
+            kill_process_group = true;
         }
     }
 
@@ -234,6 +236,7 @@ fn printUsage(program_name: []const u8, writer: anytype) !void {
         \\  -h: Show this help message and exit.
         \\  -e EXIT_CODE: Remap EXIT_CODE (from 0 to 255) to 0 (can be repeated).
         \\  -p SIGNAL: Trigger SIGNAL when parent dies, e.g. "-p SIGKILL".
+        \\  -g: Kill the process group instead of the process.
         \\
     , .{ basename, basename });
 }
@@ -377,7 +380,7 @@ fn waitAndForwardSignal(parent_sigset: *std.posix.sigset_t, child_pid: std.posix
         else => {
             std.log.debug("Passing signal: '{d}'", .{sig.signo});
             // Forward anything else
-            std.posix.kill(if (kill_process_group != 0) -child_pid else child_pid, @intCast(sig.signo)) catch |err| {
+            std.posix.kill(if (kill_process_group) -child_pid else child_pid, @intCast(sig.signo)) catch |err| {
                 if (err == error.ProcessNotFound) {
                     std.log.warn("Child was dead when forwarding signal", .{});
                 } else {
