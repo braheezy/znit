@@ -22,9 +22,5 @@
       ]
     }
   },
-  "remoteUser": "vscode",
-  "mounts": [
-    "source=${localEnv:HOME}/.gitconfig-personal,target=/tmp/.gitconfig-personal,type=bind"
-  ],
-  "postCreateCommand": "cp /tmp/.gitconfig-personal ~/.gitconfig"
+  "remoteUser": "vscode"
 }
