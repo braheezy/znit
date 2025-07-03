@@ -9,6 +9,7 @@ var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 
 var parent_death_signal: u6 = 0;
 var kill_process_group: bool = false;
+var warn_on_reap: bool = false;
 const ts = std.posix.timespec{ .sec = 1, .nsec = 0 };
 const STATUS_MAX = 255;
 const STATUS_MIN = 0;
@@ -198,6 +199,8 @@ fn parseArgs(args: [][:0]u8) ![][:0]u8 {
             };
         } else if (std.mem.eql(u8, arg, "-g")) {
             kill_process_group = true;
+        } else if (std.mem.eql(u8, arg, "-w")) {
+            warn_on_reap = true;
         }
     }
 
@@ -237,6 +240,7 @@ fn printUsage(program_name: []const u8, writer: anytype) !void {
         \\  -e EXIT_CODE: Remap EXIT_CODE (from 0 to 255) to 0 (can be repeated).
         \\  -p SIGNAL: Trigger SIGNAL when parent dies, e.g. "-p SIGKILL".
         \\  -g: Kill the process group instead of the process.
+        \\  -w: Print a warning when processes are getting reaped.
         \\
     , .{ basename, basename });
 }
@@ -513,8 +517,11 @@ fn reapZombies(child_pid: std.posix.pid_t) !?u32 {
                     if (int32BitfieldTest(expect_status, exitcode.?)) {
                         exitcode = 0;
                     }
+                } else if (warn_on_reap) {
+                    std.log.warn("Reaped zombie process with pid={d}", .{current_pid});
                 }
 
+                // Check if other childs have been reaped.
                 continue;
             },
         }
