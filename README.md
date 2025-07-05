@@ -25,6 +25,9 @@ RUN chmod +x /usr/local/bin/znit
 
 # Set znit as the entrypoint
 ENTRYPOINT ["/usr/local/bin/znit", "--"]
+
+# Run your program under znit
+CMD ["/your/program", "-and", "-its", "arguments"]
 ```
 
 ## Development
