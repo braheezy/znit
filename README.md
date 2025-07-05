@@ -4,7 +4,7 @@ This is a minimal `init` system based off of [`tini`](https://github.com/krallin
 
 Just like Tini, `znit` spawns a single child and waits for it to exit, reaping zombies and performing signal forwarding. It's meant to run in a container.
 
-`znit` tries to match `tini` in behavior but most of the extra features and options are implemented yet so just use `tini` if you need an init system. See `znit --help` for the supported options.
+`znit` is a drop-in replacement to `tini`. If it doesn't match, it is a bug, please report! See `znit --help` for the supported options.
 
 ## Usage
 
