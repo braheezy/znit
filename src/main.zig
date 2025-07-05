@@ -10,39 +10,40 @@ var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 var parent_death_signal: u6 = 0;
 var kill_process_group: bool = false;
 var warn_on_reap: bool = false;
+var subreaper: bool = false;
 const ts = std.posix.timespec{ .sec = 1, .nsec = 0 };
 const STATUS_MAX = 255;
 const STATUS_MIN = 0;
-const expect_status = [_]u32{0} ** ((STATUS_MAX - STATUS_MIN + 1) / 32);
+var expect_status = [_]u32{0} ** ((STATUS_MAX - STATUS_MIN + 1) / 32);
 const signals = std.StaticStringMap(u6).initComptime(.{
-    .{ .key = "SIGHUP", .value = std.posix.SIG.HUP },
-    .{ .key = "SIGINT", .value = std.posix.SIG.INT },
-    .{ .key = "SIGQUIT", .value = std.posix.SIG.QUIT },
-    .{ .key = "SIGILL", .value = std.posix.SIG.ILL },
-    .{ .key = "SIGTRAP", .value = std.posix.SIG.TRAP },
-    .{ .key = "SIGABRT", .value = std.posix.SIG.ABRT },
-    .{ .key = "SIGBUS", .value = std.posix.SIG.BUS },
-    .{ .key = "SIGFPE", .value = std.posix.SIG.FPE },
-    .{ .key = "SIGKILL", .value = std.posix.SIG.KILL },
-    .{ .key = "SIGUSR1", .value = std.posix.SIG.USR1 },
-    .{ .key = "SIGSEGV", .value = std.posix.SIG.SEGV },
-    .{ .key = "SIGUSR2", .value = std.posix.SIG.USR2 },
-    .{ .key = "SIGPIPE", .value = std.posix.SIG.PIPE },
-    .{ .key = "SIGALRM", .value = std.posix.SIG.ALRM },
-    .{ .key = "SIGTERM", .value = std.posix.SIG.TERM },
-    .{ .key = "SIGCHLD", .value = std.posix.SIG.CHLD },
-    .{ .key = "SIGCONT", .value = std.posix.SIG.CONT },
-    .{ .key = "SIGSTOP", .value = std.posix.SIG.STOP },
-    .{ .key = "SIGTSTP", .value = std.posix.SIG.TSTP },
-    .{ .key = "SIGTTIN", .value = std.posix.SIG.TTIN },
-    .{ .key = "SIGTTOU", .value = std.posix.SIG.TTOU },
-    .{ .key = "SIGURG", .value = std.posix.SIG.URG },
-    .{ .key = "SIGXCPU", .value = std.posix.SIG.XCPU },
-    .{ .key = "SIGXFSZ", .value = std.posix.SIG.XFSZ },
-    .{ .key = "SIGVTALRM", .value = std.posix.SIG.VTALRM },
-    .{ .key = "SIGPROF", .value = std.posix.SIG.PROF },
-    .{ .key = "SIGWINCH", .value = std.posix.SIG.WINCH },
-    .{ .key = "SIGSYS", .value = std.posix.SIG.SYS },
+    .{ "SIGHUP", std.posix.SIG.HUP },
+    .{ "SIGINT", std.posix.SIG.INT },
+    .{ "SIGQUIT", std.posix.SIG.QUIT },
+    .{ "SIGILL", std.posix.SIG.ILL },
+    .{ "SIGTRAP", std.posix.SIG.TRAP },
+    .{ "SIGABRT", std.posix.SIG.ABRT },
+    .{ "SIGBUS", std.posix.SIG.BUS },
+    .{ "SIGFPE", std.posix.SIG.FPE },
+    .{ "SIGKILL", std.posix.SIG.KILL },
+    .{ "SIGUSR1", std.posix.SIG.USR1 },
+    .{ "SIGSEGV", std.posix.SIG.SEGV },
+    .{ "SIGUSR2", std.posix.SIG.USR2 },
+    .{ "SIGPIPE", std.posix.SIG.PIPE },
+    .{ "SIGALRM", std.posix.SIG.ALRM },
+    .{ "SIGTERM", std.posix.SIG.TERM },
+    .{ "SIGCHLD", std.posix.SIG.CHLD },
+    .{ "SIGCONT", std.posix.SIG.CONT },
+    .{ "SIGSTOP", std.posix.SIG.STOP },
+    .{ "SIGTSTP", std.posix.SIG.TSTP },
+    .{ "SIGTTIN", std.posix.SIG.TTIN },
+    .{ "SIGTTOU", std.posix.SIG.TTOU },
+    .{ "SIGURG", std.posix.SIG.URG },
+    .{ "SIGXCPU", std.posix.SIG.XCPU },
+    .{ "SIGXFSZ", std.posix.SIG.XFSZ },
+    .{ "SIGVTALRM", std.posix.SIG.VTALRM },
+    .{ "SIGPROF", std.posix.SIG.PROF },
+    .{ "SIGWINCH", std.posix.SIG.WINCH },
+    .{ "SIGSYS", std.posix.SIG.SYS },
 });
 
 const SignalConfiguration = struct {
@@ -117,6 +118,12 @@ pub fn main() void {
     if (parent_death_signal != 0) {
         _ = std.posix.prctl(std.posix.PR.SET_PDEATHSIG, .{parent_death_signal}) catch |err| {
             std.log.err("Failed to set up parent death signal: {any}", .{err});
+            std.process.exit(1);
+        };
+    }
+
+    if (subreaper) {
+        registerSubreaper() catch {
             std.process.exit(1);
         };
     }
@@ -201,6 +208,8 @@ fn parseArgs(args: [][:0]u8) ![][:0]u8 {
             kill_process_group = true;
         } else if (std.mem.eql(u8, arg, "-w")) {
             warn_on_reap = true;
+        } else if (std.mem.eql(u8, arg, "-s")) {
+            subreaper = true;
         }
     }
 
@@ -220,8 +229,8 @@ fn addExpectStatus(arg: []const u8) !void {
         return error.InvalidStatus;
     }
 
-    checkBitfieldBounds(expect_status, status);
-    int32BitfieldSet(expect_status, status);
+    checkBitfieldBounds(&expect_status, status);
+    int32BitfieldSet(&expect_status, status);
 }
 
 fn printUsage(program_name: []const u8, writer: anytype) !void {
@@ -241,6 +250,7 @@ fn printUsage(program_name: []const u8, writer: anytype) !void {
         \\  -p SIGNAL: Trigger SIGNAL when parent dies, e.g. "-p SIGKILL".
         \\  -g: Kill the process group instead of the process.
         \\  -w: Print a warning when processes are getting reaped.
+        \\  -s: Register as a process subreaper (requires Linux >= 3.4).
         \\
     , .{ basename, basename });
 }
@@ -292,7 +302,31 @@ fn configureSignals(parent_sigset: *std.posix.sigset_t, sigconf: *SignalConfigur
 fn checkReaper() !void {
     if (std.os.linux.getpid() == 1) return;
 
-    std.log.warn("znit is not running as PID 1. Zombie processes will not be re-parented to znit, so zombie reaping won't work. To fix the problem, run znit as PID 1.", .{});
+    if (subreaper) {
+        const bit = std.posix.prctl(std.posix.PR.GET_CHILD_SUBREAPER, .{1}) catch |err| {
+            std.log.err("Failed to read child subreaper attribute: {s}", .{@errorName(err)});
+            return err;
+        };
+        if (bit == 1) return;
+    }
+
+    std.log.warn(
+        \\znit is not running as PID 1{s}. Zombie processes will not be re-parented to znit, so zombie reaping won't work.
+        \\To fix the problem,{s} run znit as PID 1.
+    , .{
+        if (subreaper) " and isn't registered as a child subreaper" else "",
+        if (subreaper) "use the -s option or " else "",
+    });
+}
+
+fn registerSubreaper() !void {
+    if (subreaper) {
+        _ = std.posix.prctl(std.posix.PR.SET_CHILD_SUBREAPER, .{1}) catch |err| {
+            std.log.err("Failed to register as child subreaper: {s}", .{@errorName(err)});
+            return err;
+        };
+        std.log.debug("Registered as child subreaper", .{});
+    }
 }
 
 fn spawn(sigconf: *SignalConfiguration, child_args: [][:0]u8, child_pid: *std.posix.pid_t) u8 {
@@ -513,8 +547,8 @@ fn reapZombies(child_pid: std.posix.pid_t) !?u32 {
                     exitcode = exitcode.? % (STATUS_MAX - STATUS_MIN + 1);
 
                     // If this exitcode was remapped, then set it to 0.
-                    checkBitfieldBounds(expect_status, exitcode.?);
-                    if (int32BitfieldTest(expect_status, exitcode.?)) {
+                    checkBitfieldBounds(&expect_status, exitcode.?);
+                    if (int32BitfieldTest(&expect_status, exitcode.?)) {
                         exitcode = 0;
                     }
                 } else if (warn_on_reap) {
@@ -531,7 +565,7 @@ fn reapZombies(child_pid: std.posix.pid_t) !?u32 {
 }
 
 fn int32BitfieldTest(F: []const u32, i: usize) bool {
-    return (F[i / 32] & (u32(1) << (i % 32))) != 0;
+    return (F[i / 32] & (@as(u32, @intCast(1)) << @intCast(i % 32))) != 0;
 }
 
 inline fn checkBitfieldBounds(F: []u32, i: isize) void {
@@ -543,7 +577,7 @@ inline fn checkBitfieldBounds(F: []u32, i: isize) void {
 inline fn int32BitfieldSet(F: []u32, i: usize) void {
     // chunk index = i / 32  (use >> 5)
     // bit mask    = 1 << (i % 32)  (use & 31)
-    F[i >> 5] |= 1 << (i & 31);
+    F[i >> 5] |= @as(u32, @intCast(1)) << @intCast(i & 31);
 }
 
 const SigsetElement = u32;
