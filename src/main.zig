@@ -342,14 +342,19 @@ fn spawn(sigconf: *SignalConfiguration, child_args: [][:0]u8, child_pid: *std.po
         // Restore all signal handlers to the way they were before we touched them.
         restoreSignals(sigconf) catch return 1;
 
+        // Create null-terminated array of pointers for execvpeZ
+        var args_array: [*:null]?[*:0]const u8 = undefined;
+        var args_buffer: [256]?[*:0]const u8 = undefined;
+        for (child_args, 0..) |arg, i| {
+            args_buffer[i] = arg.ptr;
+        }
+        args_buffer[child_args.len] = null;
+        args_array = @ptrCast(&args_buffer);
+
         var env = [_:null]?[*:0]u8{};
-        var args = [_:null]?[*:0]const u8{ "echo", "machin", "test" };
 
         // Use execvpeZ to search PATH - this function returns noreturn on success, error on failure
-        std.debug.print("execvpeZ: {s}\n", .{
-            child_args,
-        });
-        const exec_err = std.posix.execvpeZ(child_args[0], args[0..args.len], env[0..env.len]);
+        const exec_err = std.posix.execvpeZ(child_args[0], args_array, env[0..env.len]);
 
         std.log.err("execvpeZ failed: {s}", .{@errorName(exec_err)});
         const status: u8 = switch (exec_err) {
