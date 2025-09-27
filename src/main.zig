@@ -94,12 +94,12 @@ pub fn main() void {
     var child_sigset: std.posix.sigset_t = undefined;
     var sig_ttin_action = std.posix.Sigaction{
         .handler = .{ .handler = SIG.IGN },
-        .mask = std.posix.empty_sigset,
+        .mask = std.posix.sigemptyset(),
         .flags = 0,
     };
     var sig_ttout_action = std.posix.Sigaction{
         .handler = .{ .handler = SIG.IGN },
-        .mask = std.posix.empty_sigset,
+        .mask = std.posix.sigemptyset(),
         .flags = 0,
     };
 
@@ -156,6 +156,9 @@ pub fn main() void {
 fn parseArgs(args: [][:0]u8) ![][:0]u8 {
     const program_name = args[0];
 
+    const writer = std.fs.File.stderr().writer(&.{});
+    var stderr = writer.interface;
+
     // Find where the actual command arguments start
     // Docker ENTRYPOINT may insert '--' as arg[1], so we need to handle:
     // Case 1: [program] [--version]                    -> args.len == 2
@@ -185,14 +188,14 @@ fn parseArgs(args: [][:0]u8) ![][:0]u8 {
     if ((args.len == 2 and std.mem.eql(u8, args[1], "-h")) or
         (args.len == 4 and has_separator and std.mem.eql(u8, args[3], "-h")))
     {
-        try printUsage(program_name, std.io.getStdErr().writer());
+        try printUsage(program_name, &stderr);
         return error.Usage;
     }
 
     // Check for other flags in any position
     for (args[start_idx..]) |arg| {
         if (std.mem.eql(u8, arg, "-h")) {
-            try printUsage(program_name, std.io.getStdErr().writer());
+            try printUsage(program_name, &stderr);
             return error.Usage;
         } else if (std.mem.eql(u8, arg, "-e")) {
             addExpectStatus(arg) catch {
@@ -215,7 +218,7 @@ fn parseArgs(args: [][:0]u8) ![][:0]u8 {
 
     // If we only have the program name (and optionally --), show usage
     if (args.len <= start_idx) {
-        try printUsage(program_name, std.io.getStdErr().writer());
+        try printUsage(program_name, &stderr);
         return error.Usage;
     }
 
@@ -233,7 +236,7 @@ fn addExpectStatus(arg: []const u8) !void {
     int32BitfieldSet(&expect_status, status);
 }
 
-fn printUsage(program_name: []const u8, writer: anytype) !void {
+fn printUsage(program_name: []const u8, writer: *std.io.Writer) !void {
     const basename = std.fs.path.basename(program_name);
 
     try writer.print("{s} ({s})\n", .{ basename, znit_version });
@@ -265,7 +268,7 @@ fn setPDeathSig(arg: []const u8) !void {
 
 fn configureSignals(parent_sigset: *std.posix.sigset_t, sigconf: *SignalConfiguration) !void {
     // block all signals that are meant to be collected by the main loop
-    parent_sigset.* = sigfillset();
+    parent_sigset.* = std.posix.sigfillset();
 
     // these shouldn't be collected by the main loop
     const signals_for_znit = [_]u6{
@@ -280,7 +283,7 @@ fn configureSignals(parent_sigset: *std.posix.sigset_t, sigconf: *SignalConfigur
         SIG.TTOU,
     };
     for (signals_for_znit) |signal| {
-        std.os.linux.sigdelset(parent_sigset, signal);
+        std.posix.sigdelset(parent_sigset, signal);
     }
 
     std.posix.sigprocmask(SIG.SETMASK, parent_sigset, sigconf.sig_mask);
@@ -291,7 +294,7 @@ fn configureSignals(parent_sigset: *std.posix.sigset_t, sigconf: *SignalConfigur
     // want that. Ignore those signals.
     var ignore_action = std.posix.Sigaction{
         .handler = .{ .handler = SIG.IGN },
-        .mask = std.posix.empty_sigset,
+        .mask = std.posix.sigemptyset(),
         .flags = 0,
     };
 
@@ -587,6 +590,6 @@ inline fn int32BitfieldSet(F: []u32, i: usize) void {
 
 const SigsetElement = u32;
 const sigset_len = @typeInfo(std.os.linux.sigset_t).array.len;
-pub fn sigfillset() std.os.linux.sigset_t {
-    return [_]SigsetElement{~@as(SigsetElement, 0)} ** sigset_len;
-}
+// pub fn sigfillset() std.os.linux.sigset_t {
+//     return [_]SigsetElement{~@as(SigsetElement, 0)} ** sigset_len;
+// }
