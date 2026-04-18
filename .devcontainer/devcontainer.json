@@ -3,24 +3,19 @@
   "build": {
     "dockerfile": "Dockerfile",
     "args": {
-      "ZIG_VERSION": "0.14.1",
-      "MINISIGN_VERSION": "0.12"
-    }
+      "ZIG_VERSION": "0.16.0",
+      "MINISIGN_VERSION": "0.12",
+    },
   },
   "capAdd": ["SYS_PTRACE"],
   "securityOpt": ["seccomp=unconfined"],
   "features": {
     "ghcr.io/devcontainers/features/git:1": {},
-    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {},
   },
   "customizations": {
     "vscode": {
-      "extensions": [
-        "ms-azuretools.vscode-docker",
-        "ziglang.vscode-zig",
-        "vadimcn.vscode-lldb"
-      ]
-    }
+      "extensions": ["ziglang.vscode-zig"],
+    },
   },
-  "remoteUser": "vscode"
 }

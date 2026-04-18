@@ -7,7 +7,7 @@ const znit_version = "0.1.0";
 
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 
-var parent_death_signal: u6 = 0;
+var parent_death_signal: ?SIG = null;
 var kill_process_group: bool = false;
 var warn_on_reap: bool = false;
 var subreaper: bool = false;
@@ -15,7 +15,7 @@ const ts = std.posix.timespec{ .sec = 1, .nsec = 0 };
 const STATUS_MAX = 255;
 const STATUS_MIN = 0;
 var expect_status = [_]u32{0} ** ((STATUS_MAX - STATUS_MIN + 1) / 32);
-const signals = std.StaticStringMap(u6).initComptime(.{
+const signals = std.StaticStringMap(SIG).initComptime(.{
     .{ "SIGHUP", std.posix.SIG.HUP },
     .{ "SIGINT", std.posix.SIG.INT },
     .{ "SIGQUIT", std.posix.SIG.QUIT },
@@ -52,35 +52,19 @@ const SignalConfiguration = struct {
     sig_ttou_action: *std.posix.Sigaction,
 };
 
-pub fn main() void {
+pub fn main(init: std.process.Init) void {
     var child_pid: std.posix.pid_t = 0;
 
     // These are passed to function to get an exit code back.
     var child_exitcode: ?u32 = null; // This isn't a valid exit code, and lets us tell whether the child has exited.
 
-    // Memory allocation setup
-    const gpa, const is_debug = gpa: {
-        if (native_os == .wasi) break :gpa .{ std.heap.wasm_allocator, false };
-        break :gpa switch (builtin.mode) {
-            .Debug, .ReleaseSafe => .{ debug_allocator.allocator(), true },
-            .ReleaseFast, .ReleaseSmall => .{ std.heap.smp_allocator, false },
-        };
-    };
-    defer if (is_debug) {
-        if (debug_allocator.deinit() == .leak) {
-            std.log.err("Memory leak detected", .{});
-            std.process.exit(1);
-        }
-    };
-
     // Read arguments
-    const args = std.process.argsAlloc(gpa) catch |err| {
+    const args = init.minimal.args.toSlice(init.arena.allocator()) catch |err| {
         std.log.err("Failed to allocate memory for arguments: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
-    defer std.process.argsFree(gpa, args);
 
-    const child_args = parseArgs(args) catch |err| {
+    const child_args = parseArgs(init.io, args) catch |err| {
         if (err == error.Version) {
             std.process.exit(0);
         } else if (err == error.Usage) {
@@ -115,8 +99,8 @@ pub fn main() void {
     };
 
     // Trigger signal on this process when the parent process exits.
-    if (parent_death_signal != 0) {
-        _ = std.posix.prctl(std.posix.PR.SET_PDEATHSIG, .{parent_death_signal}) catch |err| {
+    if (parent_death_signal) |signal| {
+        _ = std.posix.prctl(std.posix.PR.SET_PDEATHSIG, .{@intFromEnum(signal)}) catch |err| {
             std.log.err("Failed to set up parent death signal: {any}", .{err});
             std.process.exit(1);
         };
@@ -134,7 +118,7 @@ pub fn main() void {
         std.process.exit(1);
     };
 
-    const ret_code = spawn(&child_sigconf, child_args, &child_pid);
+    const ret_code = spawn(&child_sigconf, child_args, init.minimal.environ.block.slice.ptr, &child_pid);
     if (ret_code != 0) std.process.exit(ret_code);
 
     while (true) {
@@ -153,10 +137,10 @@ pub fn main() void {
     }
 }
 
-fn parseArgs(args: [][:0]u8) ![][:0]u8 {
+fn parseArgs(io: std.Io, args: []const [:0]const u8) ![]const [:0]const u8 {
     const program_name = args[0];
 
-    const writer = std.fs.File.stderr().writer(&.{});
+    const writer = std.Io.File.stderr().writer(io, &.{});
     var stderr = writer.interface;
 
     // Find where the actual command arguments start
@@ -236,7 +220,7 @@ fn addExpectStatus(arg: []const u8) !void {
     int32BitfieldSet(&expect_status, status);
 }
 
-fn printUsage(program_name: []const u8, writer: *std.io.Writer) !void {
+fn printUsage(program_name: []const u8, writer: *std.Io.Writer) !void {
     const basename = std.fs.path.basename(program_name);
 
     try writer.print("{s} ({s})\n", .{ basename, znit_version });
@@ -271,7 +255,7 @@ fn configureSignals(parent_sigset: *std.posix.sigset_t, sigconf: *SignalConfigur
     parent_sigset.* = std.posix.sigfillset();
 
     // these shouldn't be collected by the main loop
-    const signals_for_znit = [_]u6{
+    const signals_for_znit = [_]SIG{
         SIG.FPE,
         SIG.ILL,
         SIG.SEGV,
@@ -332,11 +316,20 @@ fn registerSubreaper() !void {
     }
 }
 
-fn spawn(sigconf: *SignalConfiguration, child_args: [][:0]u8, child_pid: *std.posix.pid_t) u8 {
-    const pid = std.posix.fork() catch |err| {
-        std.log.err("fork failed: {s}", .{@errorName(err)});
-        return 1;
-    };
+fn spawn(
+    sigconf: *SignalConfiguration,
+    child_args: []const [:0]const u8,
+    child_env: [*:null]const ?[*:0]const u8,
+    child_pid: *std.posix.pid_t,
+) u8 {
+    const rc = std.os.linux.fork();
+    const pid: u16 = switch (std.posix.errno(rc)) {
+            .SUCCESS => @intCast(rc),
+            else => |err| {
+                std.log.err("fork failed: {s}", .{@errorName(std.posix.unexpectedErrno(err))});
+                return 1;
+            }
+        };
 
     if (pid == 0) {
         // Put the child in a process group and make it the foreground process if there is a tty.
@@ -346,7 +339,7 @@ fn spawn(sigconf: *SignalConfiguration, child_args: [][:0]u8, child_pid: *std.po
         restoreSignals(sigconf) catch return 1;
 
         // Create null-terminated array of pointers for execvpeZ
-        var args_array: [*:null]?[*:0]const u8 = undefined;
+        var args_array: [*:null]const ?[*:0]const u8 = undefined;
         var args_buffer: [256]?[*:0]const u8 = undefined;
         for (child_args, 0..) |arg, i| {
             args_buffer[i] = arg.ptr;
@@ -354,15 +347,12 @@ fn spawn(sigconf: *SignalConfiguration, child_args: [][:0]u8, child_pid: *std.po
         args_buffer[child_args.len] = null;
         args_array = @ptrCast(&args_buffer);
 
-        var env = [_:null]?[*:0]u8{};
+        const exec_err = std.posix.errno(std.os.linux.execve(child_args[0].ptr, args_array, child_env));
 
-        // Use execvpeZ to search PATH - this function returns noreturn on success, error on failure
-        const exec_err = std.posix.execvpeZ(child_args[0], args_array, env[0..env.len]);
-
-        std.log.err("execvpeZ failed: {s}", .{@errorName(exec_err)});
+        std.log.err("execve failed: {s}", .{@tagName(exec_err)});
         const status: u8 = switch (exec_err) {
-            error.AccessDenied => 126,
-            error.FileNotFound => 127,
+            .ACCES => 126,
+            .NOENT => 127,
             else => 1,
         };
         std.process.exit(status);
@@ -376,10 +366,15 @@ fn spawn(sigconf: *SignalConfiguration, child_args: [][:0]u8, child_pid: *std.po
 
 fn isolateChild() !void {
     // Put the child into a new process group.
-    std.posix.setpgid(0, 0) catch |err| {
-        std.log.err("setpgid failed: {s}", .{@errorName(err)});
-        return error.SetpgidFailed;
-    };
+    const rc = std.os.linux.setpgid(0, 0);
+    switch (std.posix.errno(rc)) {
+            .SUCCESS => {},
+            else => |err| {
+                std.log.err("setpgid failed: {s}", .{@errorName(std.posix.unexpectedErrno(err))});
+                return error.SetpgidFailed;
+         }
+    }
+
 
     // If there is a tty, allocate it to this new process group. We
     // can do this in the child process because we're blocking
@@ -426,7 +421,7 @@ fn waitAndForwardSignal(parent_sigset: *std.posix.sigset_t, child_pid: std.posix
         else => {
             std.log.debug("Passing signal: '{d}'", .{sig.signo});
             // Forward anything else
-            std.posix.kill(if (kill_process_group) -child_pid else child_pid, @intCast(sig.signo)) catch |err| {
+            std.posix.kill(if (kill_process_group) -child_pid else child_pid, sig.signo) catch |err| {
                 if (err == error.ProcessNotFound) {
                     std.log.warn("Child was dead when forwarding signal", .{});
                 } else {
@@ -477,8 +472,13 @@ fn getpgrp() !std.posix.pid_t {
     }
 }
 
+const WaitPidResult = struct {
+    pid: std.posix.pid_t,
+    status: u32,
+};
+
 // Safe wrapper around waitpid that handles ECHILD properly
-fn safe_waitpid(wpid: std.posix.pid_t, options: u32) ?std.posix.WaitPidResult {
+fn safe_waitpid(wpid: std.posix.pid_t, options: u32) ?WaitPidResult {
     std.log.debug("safe_waitpid: Called with wpid={d}, options={d}", .{ wpid, options });
 
     // Manual waitpid implementation that handles ECHILD by returning null
@@ -544,8 +544,9 @@ fn reapZombies(child_pid: std.posix.pid_t) !?u32 {
                     } else if (std.os.linux.W.IFSIGNALED(status)) {
                         // Our process was terminated. Emulate what sh / bash
                         // would do, which is to return 128 + signal number.
-                        std.log.info("Main child exited with signal (with signal '{d}')", .{std.os.linux.W.TERMSIG(status)});
-                        exitcode = 128 + std.os.linux.W.TERMSIG(status);
+                        const term_sig = std.os.linux.W.TERMSIG(status);
+                        std.log.info("Main child exited with signal (with signal '{d}')", .{@intFromEnum(term_sig)});
+                        exitcode = 128 + @intFromEnum(term_sig);
                     } else {
                         std.log.err("Main child exited for unknown reason", .{});
                         return error.UnknownExitStatus;
