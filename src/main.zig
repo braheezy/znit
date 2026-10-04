@@ -14,7 +14,7 @@ var subreaper: bool = false;
 const ts = std.posix.timespec{ .sec = 1, .nsec = 0 };
 const STATUS_MAX = 255;
 const STATUS_MIN = 0;
-var expect_status = [_]u32{0} ** ((STATUS_MAX - STATUS_MIN + 1) / 32);
+var expect_status: [((STATUS_MAX - STATUS_MIN + 1) / 32)]u32 = @splat(0);
 const signals = std.StaticStringMap(SIG).initComptime(.{
     .{ "SIGHUP", std.posix.SIG.HUP },
     .{ "SIGINT", std.posix.SIG.INT },
@@ -324,12 +324,12 @@ fn spawn(
 ) u8 {
     const rc = std.os.linux.fork();
     const pid: u16 = switch (std.posix.errno(rc)) {
-            .SUCCESS => @intCast(rc),
-            else => |err| {
-                std.log.err("fork failed: {s}", .{@errorName(std.posix.unexpectedErrno(err))});
-                return 1;
-            }
-        };
+        .SUCCESS => @intCast(rc),
+        else => |err| {
+            std.log.err("fork failed: {s}", .{@errorName(std.posix.unexpectedErrno(err))});
+            return 1;
+        },
+    };
 
     if (pid == 0) {
         // Put the child in a process group and make it the foreground process if there is a tty.
@@ -368,13 +368,12 @@ fn isolateChild() !void {
     // Put the child into a new process group.
     const rc = std.os.linux.setpgid(0, 0);
     switch (std.posix.errno(rc)) {
-            .SUCCESS => {},
-            else => |err| {
-                std.log.err("setpgid failed: {s}", .{@errorName(std.posix.unexpectedErrno(err))});
-                return error.SetpgidFailed;
-         }
+        .SUCCESS => {},
+        else => |err| {
+            std.log.err("setpgid failed: {s}", .{@errorName(std.posix.unexpectedErrno(err))});
+            return error.SetpgidFailed;
+        },
     }
-
 
     // If there is a tty, allocate it to this new process group. We
     // can do this in the child process because we're blocking
@@ -482,7 +481,7 @@ fn safe_waitpid(wpid: std.posix.pid_t, options: u32) ?WaitPidResult {
     std.log.debug("safe_waitpid: Called with wpid={d}, options={d}", .{ wpid, options });
 
     // Manual waitpid implementation that handles ECHILD by returning null
-    var status: if (builtin.link_libc) c_int else u32 = undefined;
+    var status: if (builtin.link_libc) c_int else i32 = undefined;
     while (true) {
         const rc = std.posix.system.waitpid(wpid, &status, @intCast(options));
         switch (std.posix.errno(rc)) {
